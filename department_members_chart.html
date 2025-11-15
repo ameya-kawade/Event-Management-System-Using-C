@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Department-wise Members | IT Club Report</title>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <style>
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #f8f9fa;
+      margin: 0;
+      padding: 20px;
+    }
+    h2 {
+      text-align: center;
+      color: #333;
+    }
+    #chart {
+      width: 90%;
+      max-width: 900px;
+      height: 500px;
+      margin: 40px auto;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      background: #fff;
+      padding: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h2>Department-wise Member Distribution</h2>
+  <div id="chart"></div>
+
+  <script>
+    // Function to load CSV file (from local file in same folder)
+    async function loadCSV(url) {
+      const response = await fetch(url);
+      const data = await response.text();
+      const lines = data.trim().split("\n");
+      const headers = lines[0].split(",");
+      const rows = lines.slice(1).map(line => {
+        const fields = [];
+        let insideQuotes = false, field = "";
+        for (let i = 0; i < line.length; i++) {
+          const c = line[i];
+          if (c === '"' && line[i + 1] === '"') { field += '"'; i++; continue; }
+          if (c === '"') { insideQuotes = !insideQuotes; continue; }
+          if (c === ',' && !insideQuotes) { fields.push(field.trim()); field = ""; }
+          else { field += c; }
+        }
+        fields.push(field.trim());
+        return fields;
+      });
+      return { headers, rows };
+    }
+
+    async function plotDepartmentCount() {
+      const csv = await loadCSV("members.csv");
+
+      const deptIndex = csv.headers.indexOf("department");
+      if (deptIndex === -1) {
+        alert("CSV missing 'department' column!");
+        return;
+      }
+
+      const deptCount = {};
+      csv.rows.forEach(r => {
+        const dept = r[deptIndex].replace(/^"|"$/g, ""); // remove surrounding quotes
+        if (dept) {
+          deptCount[dept] = (deptCount[dept] || 0) + 1;
+        }
+      });
+
+      const departments = Object.keys(deptCount);
+      const counts = Object.values(deptCount);
+
+      const trace = {
+        x: departments,
+        y: counts,
+        type: 'bar',
+        text: counts.map(c => `${c} Members`),
+        textposition: 'auto',
+        marker: {
+          color: 'rgba(58,71,80,0.6)',
+          line: { color: 'rgba(58,71,80,1.0)', width: 1 }
+        }
+      };
+
+      const layout = {
+        title: 'Members per Department',
+        xaxis: { title: 'Department', tickangle: -45 },
+        yaxis: { title: 'Number of Members' },
+        margin: { t: 60, b: 120 },
+        plot_bgcolor: '#fdfdfd',
+        paper_bgcolor: '#fdfdfd'
+      };
+
+      Plotly.newPlot('chart', [trace], layout);
+    }
+
+    plotDepartmentCount();
+  </script>
+</body>
+</html>

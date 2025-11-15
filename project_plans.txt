@@ -1,0 +1,9 @@
+1. Use Hashmap for storing deparments key will be department name and the value will point to root of avl tree for storing values.This will improve time complexity from O(n) to O(log n).If collisions occur then chaining will be used.
+
+2. Use encrpytion and decrpytion when exporting and importing file that contains data.
+
+3. Save file after certain interval using threads(automatically) but also save mannually before program termination.
+
+4. Create indexes for record stored in file(offsets for the values since it will stored in binary format) and create a avl tree for storing the offset which will improve the performance(for searching based on id).
+
+5. Genaralized linked list, will point to Hashmap of Department, Events, Feedback.
