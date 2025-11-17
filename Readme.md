@@ -1,0 +1,1 @@
+gcc -pthread club_system.c -o club_system && ./club_system
