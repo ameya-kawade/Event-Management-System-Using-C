@@ -1,11 +1,3 @@
-// club_system.c
-// Fully fixed single-file implementation
-// Architecture: top-level HashMap (bucket -> AVL tree) for Departments & Events
-// Members & Feedback: HashMap_Chain with AVLChain separation per owner_id
-// Persistence: departments.dat, events.dat, feedback.dat
-// Encryption: XOR to .enc files
-// User-provided IDs; edit event financials; autosave thread
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +9,10 @@
    Input helpers
    ======================= */
 static void input_read_line(char* buf, size_t sz) {
-    if (!fgets(buf, sz, stdin)) { buf[0] = '\0'; return; }
+    if (!fgets(buf, sz, stdin)) {
+        buf[0] = '\0'; 
+        return; 
+    }
     buf[strcspn(buf, "\n")] = '\0';
 }
 static int input_read_int(int* out) {
@@ -52,8 +47,13 @@ struct AVL_Node {
     AVL_Node* right;
 };
 
-static int avl_height(AVL_Node* n) { return n ? n->height : 0; }
-static int avl_max(int a, int b) { return a > b ? a : b; }
+static int avl_height(AVL_Node* n) { 
+    return n ? n->height : 0; 
+}
+
+static int avl_max(int a, int b) { 
+    return a > b ? a : b; 
+}
 
 static AVL_Node* avl_right_rotate(AVL_Node* y) {
     AVL_Node* x = y->left;
@@ -75,7 +75,9 @@ static AVL_Node* avl_left_rotate(AVL_Node* x) {
     return y;
 }
 
-static int avl_get_balance(AVL_Node* n) { return n ? avl_height(n->left) - avl_height(n->right) : 0; }
+static int get_balance_factor(AVL_Node* n) { 
+    return n ? avl_height(n->left) - avl_height(n->right) : 0;
+}
 
 static AVL_Node* avl_new_node(int key, void* data) {
     AVL_Node* n = (AVL_Node*)malloc(sizeof(AVL_Node));
@@ -85,40 +87,77 @@ static AVL_Node* avl_new_node(int key, void* data) {
 
 static AVL_Node* avl_insert(AVL_Node* node, int key, void* data) {
     if (!node) return avl_new_node(key, data);
-    if (key < node->key) node->left = avl_insert(node->left, key, data);
-    else if (key > node->key) node->right = avl_insert(node->right, key, data);
-    else { node->data = data; return node; }
+
+    if (key < node->key){
+        node->left = avl_insert(node->left, key, data);
+    }
+    else if (key > node->key){ 
+        node->right = avl_insert(node->right, key, data);
+    }
+    else { 
+        node->data = data; 
+        return node; 
+    }
+    
     node->height = 1 + avl_max(avl_height(node->left), avl_height(node->right));
-    int balance = avl_get_balance(node);
+
+    int balance = get_balance_factor(node);
+    
     if (balance > 1 && key < node->left->key) return avl_right_rotate(node);
+    
     if (balance < -1 && key > node->right->key) return avl_left_rotate(node);
-    if (balance > 1 && key > node->left->key) { node->left = avl_left_rotate(node->left); return avl_right_rotate(node); }
-    if (balance < -1 && key < node->right->key) { node->right = avl_right_rotate(node->right); return avl_left_rotate(node); }
+    
+    if (balance > 1 && key > node->left->key) { 
+        node->left = avl_left_rotate(node->left);
+        return avl_right_rotate(node); 
+    }
+    if (balance < -1 && key < node->right->key) { 
+        node->right = avl_right_rotate(node->right); 
+        return avl_left_rotate(node); 
+    }
+
     return node;
 }
 
 static AVL_Node* avl_search(AVL_Node* root, int key) {
-    if (!root) return NULL;
-    if (root->key == key) return root;
-    if (key < root->key) return avl_search(root->left, key);
-    return avl_search(root->right, key);
+    if (!root) 
+        return NULL;
+    
+    if (root->key == key) 
+        return root;
+
+    if (key < root->key) 
+        return avl_search(root->left, key);
+    else
+        return avl_search(root->right, key);
 }
 
 static AVL_Node* avl_min_value_node(AVL_Node* node) {
     AVL_Node* current = node;
-    while (current && current->left) current = current->left;
+    while (current && current->left) {
+        current = current->left;
+    }
     return current;
 }
 
 static AVL_Node* avl_delete(AVL_Node* root, int key) {
     if (!root) return root;
-    if (key < root->key) root->left = avl_delete(root->left, key);
-    else if (key > root->key) root->right = avl_delete(root->right, key);
+
+    if (key < root->key) {
+        root->left = avl_delete(root->left, key);
+    }
+    else if (key > root->key) {
+        root->right = avl_delete(root->right, key);
+    }
     else {
         if (!root->left || !root->right) {
             AVL_Node* temp = root->left ? root->left : root->right;
-            if (!temp) { temp = root; root = NULL; }
-            else *root = *temp;
+            if (!temp) { 
+                temp = root; root = NULL; 
+            }
+            else{ 
+                *root = *temp;
+            }
             free(temp);
         } else {
             AVL_Node* temp = avl_min_value_node(root->right);
@@ -127,13 +166,15 @@ static AVL_Node* avl_delete(AVL_Node* root, int key) {
             root->right = avl_delete(root->right, temp->key);
         }
     }
+    
     if (!root) return root;
+
     root->height = 1 + avl_max(avl_height(root->left), avl_height(root->right));
-    int balance = avl_get_balance(root);
-    if (balance > 1 && avl_get_balance(root->left) >= 0) return avl_right_rotate(root);
-    if (balance > 1 && avl_get_balance(root->left) < 0) { root->left = avl_left_rotate(root->left); return avl_right_rotate(root); }
-    if (balance < -1 && avl_get_balance(root->right) <= 0) return avl_left_rotate(root);
-    if (balance < -1 && avl_get_balance(root->right) > 0) { root->right = avl_right_rotate(root->right); return avl_left_rotate(root); }
+    int balance = get_balance_factor(root);
+    if (balance > 1 && get_balance_factor(root->left) >= 0) return avl_right_rotate(root);
+    if (balance > 1 && get_balance_factor(root->left) < 0) { root->left = avl_left_rotate(root->left); return avl_right_rotate(root); }
+    if (balance < -1 && get_balance_factor(root->right) <= 0) return avl_left_rotate(root);
+    if (balance < -1 && get_balance_factor(root->right) > 0) { root->right = avl_right_rotate(root->right); return avl_left_rotate(root); }
     return root;
 }
 
@@ -170,11 +211,14 @@ typedef struct HashMap_Chain {
 
 static HashMap_Chain* create_HashMap_Chain(int size, int mode) {
     HashMap_Chain* hm = (HashMap_Chain*)malloc(sizeof(HashMap_Chain));
-    hm->size = size; hm->mode = mode;
+    hm->size = size; 
+    hm->mode = mode;
     hm->buckets = calloc(size, sizeof(void*));
     return hm;
 }
-static int hm_hash(int key, int size) { return abs(key) % size; }
+static int hm_hash(int key, int size) { 
+    return abs(key) % size; 
+}
 
 /* Top-level insert/get for mode=0 */
 static void hms_insert_top(HashMap_Chain* map, int key, void* data) {
@@ -194,7 +238,8 @@ static void* hms_get_top(HashMap_Chain* map, int key) {
 static int hms_count_all(HashMap_Chain* map) {
     if (!map || map->mode != 0) return 0;
     int total = 0;
-    for (int i = 0; i < map->size; ++i) total += avl_count_nodes((AVL_Node*)map->buckets[i]);
+    for (int i = 0; i < map->size; ++i) 
+        total += avl_count_nodes((AVL_Node*)map->buckets[i]);
     return total;
 }
 static void hms_traverse_all(HashMap_Chain* map, void (*cb)(void*)) {
@@ -205,12 +250,16 @@ static void hms_traverse_all(HashMap_Chain* map, void (*cb)(void*)) {
 /* Chain helpers for mode=1 */
 static AVLChain* avlchain_find(AVLChain* head, int owner_id) {
     AVLChain* cur = head;
-    while (cur) { if (cur->owner_id == owner_id) return cur; cur = cur->next; }
+    while (cur) {
+        if (cur->owner_id == owner_id) return cur; 
+        cur = cur->next; 
+    }
     return NULL;
 }
 static AVLChain* avlchain_create_prepend(HashMap_Chain* map, int idx, int owner_id) {
     AVLChain* node = (AVLChain*)malloc(sizeof(AVLChain));
-    node->owner_id = owner_id; node->tree = NULL;
+    node->owner_id = owner_id; 
+    node->tree = NULL;
     node->next = (AVLChain*)map->buckets[idx];
     map->buckets[idx] = node;
     return node;
@@ -219,16 +268,22 @@ static void hmchain_insert_record(HashMap_Chain* map, int key, void* data, int o
     if (!map || map->mode != 1) return;
     int idx = hm_hash(key, map->size);
     AVLChain* head = (AVLChain*)map->buckets[idx];
+
     AVLChain* chain = avlchain_find(head, owner_id);
-    if (!chain) chain = avlchain_create_prepend(map, idx, owner_id);
+
+    if (!chain) 
+        chain = avlchain_create_prepend(map, idx, owner_id);
+
     chain->tree = avl_insert(chain->tree, key, data);
 }
+
 static void* hmchain_get_record(HashMap_Chain* map, int key, int owner_id) {
     if (!map || map->mode != 1) return NULL;
     int idx = hm_hash(key, map->size);
     AVLChain* head = (AVLChain*)map->buckets[idx];
     AVLChain* chain = avlchain_find(head, owner_id);
-    if (!chain) return NULL;
+    if (!chain) 
+        return NULL;
     AVL_Node* n = avl_search(chain->tree, key);
     return n ? n->data : NULL;
 }
@@ -237,7 +292,8 @@ static void hmchain_delete_record(HashMap_Chain* map, int key, int owner_id) {
     int idx = hm_hash(key, map->size);
     AVLChain* head = (AVLChain*)map->buckets[idx];
     AVLChain* chain = avlchain_find(head, owner_id);
-    if (!chain) return;
+    if (!chain) 
+        return;
     chain->tree = avl_delete(chain->tree, key);
 }
 static void hmchain_traverse_owner(HashMap_Chain* map, int owner_id, void (*cb)(void*)) {
@@ -255,7 +311,11 @@ static int hmchain_count_owner(HashMap_Chain* map, int owner_id) {
     int total = 0;
     for (int i = 0; i < map->size; ++i) {
         AVLChain* cur = (AVLChain*)map->buckets[i];
-        while (cur) { if (cur->owner_id == owner_id) total += avl_count_nodes(cur->tree); cur = cur->next; }
+        while (cur) { 
+            if (cur->owner_id == owner_id) 
+                total += avl_count_nodes(cur->tree); 
+            cur = cur->next; 
+        }
     }
     return total;
 }
@@ -349,7 +409,9 @@ static IT_Club_System* system_create() {
    ======================= */
 static Department* department_create(int dept_id, const char* name) {
     Department* d = (Department*)malloc(sizeof(Department));
-    d->dept_id = dept_id; strncpy(d->name, name, sizeof(d->name)-1); d->name[sizeof(d->name)-1] = '\0';
+    d->dept_id = dept_id; 
+    strncpy(d->name, name, sizeof(d->name)-1); 
+    d->name[sizeof(d->name)-1] = '\0';
     d->member_map = create_HashMap_Chain(10, 1);
     d->member_count = 0;
     return d;
@@ -373,7 +435,10 @@ static Event* event_create(int event_id, const char* name, const char* venue, co
    Display callbacks
    ======================= */
 static void display_member_cb(void* data) {
-    Member* m = (Member*)data; if (!m) return;
+    Member* m = (Member*)data; 
+    if (!m){
+       return; 
+    } 
     printf("  ID:%d | %s | Role:%s | Contact:%s | Dept:%s\n", m->member_id, m->name, m->role, m->contact, m->department_name);
 }
 static void display_feedback_cb(void* data) {
@@ -408,7 +473,9 @@ static void persist_write_feedback_avl(AVL_Node* root, int event_id) {
     if (!root || !persist_feedback_fp) return;
     persist_write_feedback_avl(root->left, event_id);
     Feedback* f = (Feedback*)root->data;
-    PersistFeedback pf; pf.event_id = event_id; pf.fb = *f;
+    PersistFeedback pf; 
+    pf.event_id = event_id; 
+    pf.fb = *f;
     fwrite(&pf, sizeof(PersistFeedback), 1, persist_feedback_fp);
     persist_write_feedback_avl(root->right, event_id);
 }
@@ -416,7 +483,10 @@ static void persist_write_feedback_avl(AVL_Node* root, int event_id) {
 /* save departments */
 static void persist_save_departments(IT_Club_System* sys) {
     FILE* fp = fopen("departments.dat", "wb");
-    if (!fp) { printf("[ERR] cannot open departments.dat\n"); return; }
+    if (!fp) { 
+        printf("[ERR] cannot open departments.dat\n");
+        return; 
+    }
     int count = hms_count_all(sys->department_map);
     fwrite(&count, sizeof(int), 1, fp);
     persist_fp_global = fp;
@@ -425,7 +495,8 @@ static void persist_save_departments(IT_Club_System* sys) {
         if (!root) continue;
         void write_dept(void* data) {
             Department* d = (Department*)data;
-            PersistDepartment pd; pd.dept_id = d->dept_id;
+            PersistDepartment pd; 
+            pd.dept_id = d->dept_id;
             strncpy(pd.name, d->name, sizeof(pd.name)-1); pd.name[sizeof(pd.name)-1] = '\0';
             pd.member_count = d->member_count;
             fwrite(&pd, sizeof(PersistDepartment), 1, persist_fp_global);
@@ -433,7 +504,8 @@ static void persist_save_departments(IT_Club_System* sys) {
             for (int b = 0; b < d->member_map->size; ++b) {
                 AVLChain* cur = (AVLChain*)d->member_map->buckets[b];
                 while (cur) {
-                    if (cur->owner_id == d->dept_id) avl_inorder(cur->tree, persist_write_member_cb);
+                    if (cur->owner_id == d->dept_id) 
+                    avl_inorder(cur->tree, persist_write_member_cb);
                     cur = cur->next;
                 }
             }
@@ -487,7 +559,10 @@ static void persist_save_events_and_feedback(IT_Club_System* sys) {
     for (int i = 0; i < sys->event_map->size; ++i) {
         AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i];
         if (!root) continue;
-        void count_fb(void* data) { Event* e = (Event*)data; total_feedback += e->feedback_count; }
+        void count_fb(void* data) { 
+            Event* e = (Event*)data; 
+            total_feedback += e->feedback_count; 
+        }
         avl_inorder(root, count_fb);
     }
     fwrite(&total_feedback, sizeof(int), 1, ffp);
@@ -500,7 +575,8 @@ static void persist_save_events_and_feedback(IT_Club_System* sys) {
             for (int b = 0; b < e->feedback_map->size; ++b) {
                 AVLChain* cur = (AVLChain*)e->feedback_map->buckets[b];
                 while (cur) {
-                    if (cur->owner_id == e->event_id) persist_write_feedback_avl(cur->tree, e->event_id);
+                    if (cur->owner_id == e->event_id) 
+                        persist_write_feedback_avl(cur->tree, e->event_id);
                     cur = cur->next;
                 }
             }
@@ -521,9 +597,13 @@ static void persist_save_all(IT_Club_System* sys) {
 static void persist_load_departments(IT_Club_System* sys) {
     FILE* fp = fopen("departments.dat", "rb");
     if (!fp) return;
-    int cnt = 0; if (fread(&cnt, sizeof(int), 1, fp) != 1) { fclose(fp); return; }
+    int cnt = 0; 
+    if (fread(&cnt, sizeof(int), 1, fp) != 1) { 
+        fclose(fp); return; 
+    }
     for (int i = 0; i < cnt; ++i) {
-        PersistDepartment pd; if (fread(&pd, sizeof(PersistDepartment), 1, fp) != 1) break;
+        PersistDepartment pd; 
+        if (fread(&pd, sizeof(PersistDepartment), 1, fp) != 1) break;
         Department* d = department_create(pd.dept_id, pd.name);
         for (int j = 0; j < pd.member_count; ++j) {
             Member* m = (Member*)malloc(sizeof(Member));
@@ -616,67 +696,122 @@ static void* autosave_thread(void* arg) {
     return NULL;
 }
 
-/* =======================
-   Reporting Top-K
-   ======================= */
+//Maxheap module
 typedef struct Heap {
-    void** data;
-    double* scores;
-    int size, capacity;
+    Event** data;    
+    int size;
+    int capacity;
 } Heap;
 
 static Heap* heap_create(int cap) {
-    Heap* h = (Heap*)malloc(sizeof(Heap));
-    h->data = malloc(sizeof(void*) * cap);
-    h->scores = malloc(sizeof(double) * cap);
-    h->size = 0; h->capacity = cap; return h;
+    Heap* h = malloc(sizeof(Heap));
+    h->data = malloc(sizeof(Event*) * cap);
+    h->size = 0;
+    h->capacity = cap;
+    return h;
 }
-static void heap_swap(Heap* h, int i, int j) {
-    double t = h->scores[i]; h->scores[i] = h->scores[j]; h->scores[j] = t;
-    void* td = h->data[i]; h->data[i] = h->data[j]; h->data[j] = td;
+
+static void heap_swap(Heap* h, int a, int b) {
+    Event* tmp = h->data[a];
+    h->data[a] = h->data[b];
+    h->data[b] = tmp;
 }
-static void heap_up(Heap* h, int idx) {
-    while (idx > 0) {
-        int p = (idx - 1) / 2;
-        if (h->scores[idx] > h->scores[p]) { heap_swap(h, idx, p); idx = p; } else break;
+
+/* Profit comparator */
+static double heap_score(Event* e) {
+    return e->profit_loss;
+}
+//recursive hepify
+static void heapify_up_recursive(Heap* h, int idx) {
+    if (idx == 0) return;
+    int parent = (idx - 1) / 2;
+
+    if (heap_score(h->data[idx]) > heap_score(h->data[parent])) {
+        heap_swap(h, idx, parent);
+        heapify_up_recursive(h, parent);
     }
 }
-static void heap_down(Heap* h, int idx) {
-    while (1) {
-        int largest = idx, l = 2*idx+1, r = 2*idx+2;
-        if (l < h->size && h->scores[l] > h->scores[largest]) largest = l;
-        if (r < h->size && h->scores[r] > h->scores[largest]) largest = r;
-        if (largest != idx) { heap_swap(h, idx, largest); idx = largest; } else break;
+// Event price comparison
+static void heapify_down_recursive(Heap* h, int idx) {
+    int left = 2*idx + 1;
+    int right = 2*idx + 2;
+
+    if (left >= h->size) return;
+
+    int largest = idx;
+
+    if (heap_score(h->data[left]) > heap_score(h->data[largest]))
+        largest = left;
+
+    if (right < h->size && heap_score(h->data[right]) > heap_score(h->data[largest]))
+        largest = right;
+
+    if (largest != idx) {
+        heap_swap(h, idx, largest);
+        heapify_down_recursive(h, largest);
     }
 }
-static void heap_insert(Heap* h, double score, void* data) {
+
+
+//   Insert Event
+static void heap_insert(Heap* h, Event* e) {
     if (h->size >= h->capacity) return;
-    h->scores[h->size] = score; h->data[h->size] = data; heap_up(h, h->size); h->size++;
+
+    int idx = h->size++;
+    h->data[idx] = e;
+
+    heapify_up_recursive(h, idx);
 }
-static void* heap_extract_max(Heap* h, double* out_score) {
+
+//extract rating 
+static Event* heap_extract_max(Heap* h) {
     if (h->size == 0) return NULL;
-    if (out_score) *out_score = h->scores[0];
-    void* d = h->data[0];
-    h->scores[0] = h->scores[h->size - 1]; h->data[0] = h->data[h->size - 1]; h->size--;
-    heap_down(h, 0); return d;
+
+    Event* max_event = h->data[0];
+
+    // Replace root with last
+    h->data[0] = h->data[h->size - 1];
+    h->size--;
+
+    heapify_down_recursive(h, 0);
+
+    return max_event;
 }
+
 static Heap* reporting_heap = NULL;
+
+/* Callback for AVL traversal */
 static void reporting_heap_cb(void* data) {
     if (!reporting_heap || !data) return;
-    Event* e = (Event*)data; heap_insert(reporting_heap, e->profit_loss, e);
+    Event* e = (Event*)data;
+    heap_insert(reporting_heap, e);
 }
+
+/* -------------------------
+   Report Top-K events
+   ------------------------- */
 static void reporting_top_k(IT_Club_System* sys, int k) {
     Heap* h = heap_create(1024);
     reporting_heap = h;
-    for (int i = 0; i < sys->event_map->size; ++i) avl_inorder((AVL_Node*)sys->event_map->buckets[i], reporting_heap_cb);
+
+    for (int i = 0; i < sys->event_map->size; ++i) {
+        AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i];
+        avl_inorder(root, reporting_heap_cb);
+    }
+
     reporting_heap = NULL;
+
     printf("\n=== Top %d Events by Profit/Loss ===\n", k);
     for (int i = 0; i < k && h->size > 0; ++i) {
-        double sc; Event* e = (Event*)heap_extract_max(h, &sc);
-        printf("%d. %s (ID:%d) — Profit: $%.2f\n", i+1, e->name, e->event_id, sc);
+        Event* e = heap_extract_max(h);
+        printf("%d. %s (ID:%d) — Profit: %.2f\n",
+               i + 1, e->name, e->event_id, e->profit_loss);
     }
-    free(h->data); free(h->scores); free(h);
+
+    free(h->data);
+    free(h);
 }
+
 
 /* =======================
    Interactive functions (create, add, display, edit)
@@ -684,8 +819,13 @@ static void reporting_top_k(IT_Club_System* sys, int k) {
 
 static void interactive_create_department(IT_Club_System* sys) {
     printf("Enter Department ID (int): "); int id; if (!input_read_int(&id)) { printf("Invalid.\n"); return; }
-    if (hms_get_top(sys->department_map, id)) { printf("ID exists.\n"); return; }
-    char name[100]; printf("Enter Department Name: "); input_read_line(name, sizeof(name));
+    if (hms_get_top(sys->department_map, id)) { 
+        printf("ID exists.\n"); 
+        return; 
+    }
+    char name[100]; 
+    printf("Enter Department Name: "); 
+    input_read_line(name, sizeof(name));
     Department* d = department_create(id, name);
     hms_insert_top(sys->department_map, id, d);
     printf("Department '%s' added (ID:%d)\n", name, id);
