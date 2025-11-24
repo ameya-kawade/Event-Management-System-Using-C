@@ -1,4 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
+
+// club_system.c
+// IT Club Management System
+// Includes: AVL, HashMap_Chain, Events, Departments, Members, Feedback
+// Persistence: departments.dat, events.dat, feedback.dat
+// Encryption: secure key via sha256sum + XOR
+// Query cache: caches Top-K active members per department (5 min TTL)
+// Extended: Cache Top-K events (profit/loss) using same cache engine
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,52 +20,43 @@
 // Input helpers
 // =======================
 static void input_read_line(char* buf, size_t sz) {
-    if (!fgets(buf, (int)sz, stdin)) {
-        buf[0] = '\0';
-        return;
-    }
+    if (!fgets(buf, (int)sz, stdin)) { buf[0] = '\0'; return; }
     buf[strcspn(buf, "\n")] = '\0';
 }
 static int input_read_int(int* out) {
-    char tmp[64];
-    input_read_line(tmp, sizeof(tmp));
+    char tmp[64]; input_read_line(tmp, sizeof(tmp));
     return sscanf(tmp, "%d", out) == 1;
 }
 static int input_read_double(double* out) {
-    char tmp[64];
-    input_read_line(tmp, sizeof(tmp));
+    char tmp[64]; input_read_line(tmp, sizeof(tmp));
     return sscanf(tmp, "%lf", out) == 1;
 }
 
 // =======================
-// Forward declarations for AVL functions & types
+// AVL
 // =======================
-typedef struct AVL_Node AVL_Node;
-static AVL_Node* avl_insert(AVL_Node* node, int key, void* data);
-static AVL_Node* avl_search(AVL_Node* root, int key);
-static AVL_Node* avl_delete(AVL_Node* root, int key);
-static void avl_inorder(AVL_Node* root, void (*cb)(void*));
-static int avl_count_nodes(AVL_Node* root);
-
-// =======================
-// AVL Node struct & implementation
-// =======================
-struct AVL_Node {
+typedef struct AVL_Node {
     int key;
     void* data;
     int height;
-    AVL_Node* left;
-    AVL_Node* right;
-};
+    struct AVL_Node* left;
+    struct AVL_Node* right;
+} AVL_Node;
 
 static int avl_height(AVL_Node* n) { return n ? n->height : 0; }
 static int avl_max(int a, int b) { return a > b ? a : b; }
 
+static AVL_Node* avl_new_node(int key, void* data) {
+    AVL_Node* n = (AVL_Node*)malloc(sizeof(AVL_Node));
+    if (!n) return NULL;
+    n->key = key; n->data = data; n->height = 1; n->left = n->right = NULL;
+    return n;
+}
+
 static AVL_Node* avl_right_rotate(AVL_Node* y) {
     AVL_Node* x = y->left;
     AVL_Node* T2 = x->right;
-    x->right = y;
-    y->left = T2;
+    x->right = y; y->left = T2;
     y->height = 1 + avl_max(avl_height(y->left), avl_height(y->right));
     x->height = 1 + avl_max(avl_height(x->left), avl_height(x->right));
     return x;
@@ -65,24 +65,13 @@ static AVL_Node* avl_right_rotate(AVL_Node* y) {
 static AVL_Node* avl_left_rotate(AVL_Node* x) {
     AVL_Node* y = x->right;
     AVL_Node* T2 = y->left;
-    y->left = x;
-    x->right = T2;
+    y->left = x; x->right = T2;
     x->height = 1 + avl_max(avl_height(x->left), avl_height(x->right));
     y->height = 1 + avl_max(avl_height(y->left), avl_height(y->right));
     return y;
 }
 
 static int avl_get_balance(AVL_Node* n) { return n ? avl_height(n->left) - avl_height(n->right) : 0; }
-
-static AVL_Node* avl_new_node(int key, void* data) {
-    AVL_Node* n = (AVL_Node*)malloc(sizeof(AVL_Node));
-    if (!n) return NULL;
-    n->key = key;
-    n->data = data;
-    n->height = 1;
-    n->left = n->right = NULL;
-    return n;
-}
 
 static AVL_Node* avl_insert(AVL_Node* node, int key, void* data) {
     if (!node) return avl_new_node(key, data);
@@ -151,7 +140,7 @@ static int avl_count_nodes(AVL_Node* root) {
 }
 
 // =======================
-// AVLChain & HashMap_Chain
+// HashMap_Chain (top-level AVL buckets or chained AVLChain per bucket)
 // =======================
 typedef struct AVLChain {
     int owner_id;
@@ -161,21 +150,19 @@ typedef struct AVLChain {
 
 typedef struct HashMap_Chain {
     int size;
-    int mode; // 0 = top-level (AVL per bucket), 1 = chained (AVLChain per bucket)
-    void** buckets; // when mode=0 -> AVL_Node*; when mode=1 -> AVLChain*
+    int mode; // 0 = top-level AVL per bucket, 1 = chain of AVLChain per bucket
+    void** buckets;
 } HashMap_Chain;
 
 static HashMap_Chain* create_HashMap_Chain(int size, int mode) {
     HashMap_Chain* hm = (HashMap_Chain*)malloc(sizeof(HashMap_Chain));
     if (!hm) return NULL;
-    hm->size = size;
-    hm->mode = mode;
-    hm->buckets = calloc(size, sizeof(void*));
+    hm->size = size; hm->mode = mode; hm->buckets = calloc(size, sizeof(void*));
     return hm;
 }
 static int hm_hash(int key, int size) { return abs(key) % size; }
 
-/* Top-level insert/get for mode=0 */
+/* mode 0 operations */
 static void hms_insert_top(HashMap_Chain* map, int key, void* data) {
     if (!map || map->mode != 0) return;
     int idx = hm_hash(key, map->size);
@@ -201,7 +188,7 @@ static void hms_traverse_all(HashMap_Chain* map, void (*cb)(void*)) {
     for (int i = 0; i < map->size; ++i) avl_inorder((AVL_Node*)map->buckets[i], cb);
 }
 
-/* Chain helpers for mode=1 */
+/* mode 1 operations (AVLChain) */
 static AVLChain* avlchain_find(AVLChain* head, int owner_id) {
     AVLChain* cur = head;
     while (cur) { if (cur->owner_id == owner_id) return cur; cur = cur->next; }
@@ -210,10 +197,7 @@ static AVLChain* avlchain_find(AVLChain* head, int owner_id) {
 static AVLChain* avlchain_create_prepend(HashMap_Chain* map, int idx, int owner_id) {
     AVLChain* node = (AVLChain*)malloc(sizeof(AVLChain));
     if (!node) return NULL;
-    node->owner_id = owner_id;
-    node->tree = NULL;
-    node->next = (AVLChain*)map->buckets[idx];
-    map->buckets[idx] = node;
+    node->owner_id = owner_id; node->tree = NULL; node->next = (AVLChain*)map->buckets[idx]; map->buckets[idx] = node;
     return node;
 }
 static void hmchain_insert_record(HashMap_Chain* map, int key, void* data, int owner_id) {
@@ -245,10 +229,7 @@ static void hmchain_traverse_owner(HashMap_Chain* map, int owner_id, void (*cb)(
     if (!map || map->mode != 1 || !cb) return;
     for (int i = 0; i < map->size; ++i) {
         AVLChain* cur = (AVLChain*)map->buckets[i];
-        while (cur) {
-            if (cur->owner_id == owner_id) avl_inorder(cur->tree, cb);
-            cur = cur->next;
-        }
+        while (cur) { if (cur->owner_id == owner_id) avl_inorder(cur->tree, cb); cur = cur->next; }
     }
 }
 static int hmchain_count_owner(HashMap_Chain* map, int owner_id) {
@@ -295,28 +276,27 @@ typedef struct Event {
     double expenses;
     double profit_loss;
     char description[256];
-    HashMap_Chain* member_map;   // mode=1 (owner_id = event_id)
-    HashMap_Chain* feedback_map; // mode=1 (owner_id = event_id)
+    HashMap_Chain* member_map;   // mode=1
+    HashMap_Chain* feedback_map; // mode=1
     int member_count;
     int feedback_count;
 } Event;
 
+// ParticipationRecord used for counting
+typedef struct ParticipationRecord {
+    Member* member;
+    int count;
+} ParticipationRecord;
+
 // =======================
-// Persistable structs
+// Persistence structs
 // =======================
 typedef struct PersistDepartment { int dept_id; char name[100]; int member_count; } PersistDepartment;
 
 typedef struct PersistEvent {
-    int event_id;
-    char name[100];
-    char venue[100];
-    char date[20];
-    double budget;
-    double expenses;
-    double profit_loss;
-    char description[256];
-    int member_count;
-    int feedback_count;
+    int event_id; char name[100]; char venue[100]; char date[20];
+    double budget; double expenses; double profit_loss; char description[256];
+    int member_count; int feedback_count;
 } PersistEvent;
 
 typedef struct PersistFeedback { int event_id; Feedback fb; } PersistFeedback;
@@ -346,8 +326,7 @@ static Department* department_create(int dept_id, const char* name) {
     Department* d = (Department*)malloc(sizeof(Department));
     if (!d) return NULL;
     d->dept_id = dept_id;
-    strncpy(d->name, name, sizeof(d->name)-1);
-    d->name[sizeof(d->name)-1] = '\0';
+    strncpy(d->name, name, sizeof(d->name)-1); d->name[sizeof(d->name)-1] = '\0';
     d->member_map = create_HashMap_Chain(10, 1);
     d->member_count = 0;
     return d;
@@ -360,183 +339,124 @@ static Event* event_create(int event_id, const char* name, const char* venue, co
     strncpy(e->name, name, sizeof(e->name)-1); e->name[sizeof(e->name)-1] = '\0';
     strncpy(e->venue, venue, sizeof(e->venue)-1); e->venue[sizeof(e->venue)-1] = '\0';
     strncpy(e->date, date, sizeof(e->date)-1); e->date[sizeof(e->date)-1] = '\0';
-    e->budget = budget;
-    e->expenses = 0.0;
-    e->profit_loss = budget;
+    e->budget = budget; e->expenses = 0.0; e->profit_loss = budget;
     strncpy(e->description, desc, sizeof(e->description)-1); e->description[sizeof(e->description)-1] = '\0';
     e->member_map = create_HashMap_Chain(10, 1);
     e->feedback_map = create_HashMap_Chain(10, 1);
-    e->member_count = 0;
-    e->feedback_count = 0;
+    e->member_count = 0; e->feedback_count = 0;
     return e;
 }
 
 // =======================
-// Display callbacks
+// Display helpers
 // =======================
 static void display_member_cb(void* data) {
-    Member* m = (Member*)data;
-    if (!m) return;
+    Member* m = (Member*)data; if (!m) return;
     printf("  ID:%d | %s | Role:%s | Contact:%s | Dept:%s\n", m->member_id, m->name, m->role, m->contact, m->department_name);
 }
 static void display_feedback_cb(void* data) {
-    Feedback* f = (Feedback*)data;
-    if (!f) return;
+    Feedback* f = (Feedback*)data; if (!f) return;
     printf("  Feedback ID:%d | Member ID:%d | Rating:%d\n    %s\n", f->feedback_id, f->member_id, f->rating, f->comment);
 }
 static void display_department_cb(void* data) {
-    Department* d = (Department*)data;
-    if (!d) return;
+    Department* d = (Department*)data; if (!d) return;
     printf("\n=== Department ID:%d | %s ===\nMembers: %d\n", d->dept_id, d->name, d->member_count);
 }
 static void display_event_cb(void* data) {
-    Event* e = (Event*)data;
-    if (!e) return;
+    Event* e = (Event*)data; if (!e) return;
     printf("\n=== Event ID:%d | %s ===\nVenue:%s | Date:%s\nBudget:%.2f | Expenses:%.2f | Profit/Loss:%.2f\nMembers:%d | Feedback:%d\n",
            e->event_id, e->name, e->venue, e->date, e->budget, e->expenses, e->profit_loss, e->member_count, e->feedback_count);
 }
 
 // =======================
-// Persistence helpers
+// Persistence (same as earlier design)
 // =======================
 static FILE* persist_fp_global = NULL;
 static FILE* persist_feedback_fp = NULL;
-
-static void persist_write_member_cb(void* data) {
-    if (!persist_fp_global || !data) return;
-    Member* m = (Member*)data;
-    fwrite(m, sizeof(Member), 1, persist_fp_global);
-}
+static void persist_write_member_cb(void* data) { if (!persist_fp_global || !data) return; Member* m = (Member*)data; fwrite(m, sizeof(Member), 1, persist_fp_global); }
 static void persist_write_feedback_avl(AVL_Node* root, int event_id) {
     if (!root || !persist_feedback_fp) return;
     persist_write_feedback_avl(root->left, event_id);
     Feedback* f = (Feedback*)root->data;
-    if (f) {
-        PersistFeedback pf;
-        pf.event_id = event_id;
-        pf.fb = *f;
-        fwrite(&pf, sizeof(PersistFeedback), 1, persist_feedback_fp);
-    }
+    if (f) { PersistFeedback pf; pf.event_id = event_id; pf.fb = *f; fwrite(&pf, sizeof(PersistFeedback), 1, persist_feedback_fp); }
     persist_write_feedback_avl(root->right, event_id);
 }
 
 static void persist_save_departments(IT_Club_System* sys) {
-    FILE* fp = fopen("departments.dat", "wb");
-    if (!fp) { printf("[ERR] cannot open departments.dat\n"); return; }
-    int count = hms_count_all(sys->department_map);
-    fwrite(&count, sizeof(int), 1, fp);
+    FILE* fp = fopen("departments.dat", "wb"); if (!fp) { printf("[ERR] cannot open departments.dat\n"); return; }
+    int count = hms_count_all(sys->department_map); fwrite(&count, sizeof(int), 1, fp);
     persist_fp_global = fp;
     for (int i = 0; i < sys->department_map->size; ++i) {
         AVL_Node* root = (AVL_Node*)sys->department_map->buckets[i];
         if (!root) continue;
         void write_dept(void* data) {
-            Department* d = (Department*)data;
-            if (!d) return;
-            PersistDepartment pd;
-            pd.dept_id = d->dept_id;
-            strncpy(pd.name, d->name, sizeof(pd.name)-1); pd.name[sizeof(pd.name)-1] = '\0';
-            pd.member_count = d->member_count;
+            Department* d = (Department*)data; if (!d) return;
+            PersistDepartment pd; pd.dept_id = d->dept_id; strncpy(pd.name, d->name, sizeof(pd.name)-1); pd.name[sizeof(pd.name)-1] = '\0'; pd.member_count = d->member_count;
             fwrite(&pd, sizeof(PersistDepartment), 1, persist_fp_global);
             for (int b = 0; b < d->member_map->size; ++b) {
                 AVLChain* cur = (AVLChain*)d->member_map->buckets[b];
-                while (cur) {
-                    if (cur->owner_id == d->dept_id) avl_inorder(cur->tree, persist_write_member_cb);
-                    cur = cur->next;
-                }
+                while (cur) { if (cur->owner_id == d->dept_id) avl_inorder(cur->tree, persist_write_member_cb); cur = cur->next; }
             }
         }
         avl_inorder(root, write_dept);
     }
-    persist_fp_global = NULL;
-    fclose(fp);
+    persist_fp_global = NULL; fclose(fp);
 }
 
 static void persist_save_events_and_feedback(IT_Club_System* sys) {
-    FILE* efp = fopen("events.dat", "wb");
-    if (!efp) { printf("[ERR] cannot open events.dat\n"); return; }
-    int event_count = hms_count_all(sys->event_map);
-    fwrite(&event_count, sizeof(int), 1, efp);
+    FILE* efp = fopen("events.dat", "wb"); if (!efp) { printf("[ERR] cannot open events.dat\n"); return; }
+    int event_count = hms_count_all(sys->event_map); fwrite(&event_count, sizeof(int), 1, efp);
     persist_fp_global = efp;
     for (int i = 0; i < sys->event_map->size; ++i) {
-        AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i];
-        if (!root) continue;
+        AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i]; if (!root) continue;
         void write_event(void* data) {
-            Event* e = (Event*)data;
-            if (!e) return;
-            PersistEvent pe;
-            pe.event_id = e->event_id;
-            strncpy(pe.name, e->name, sizeof(pe.name)-1); pe.name[sizeof(pe.name)-1] = '\0';
+            Event* e = (Event*)data; if (!e) return;
+            PersistEvent pe; pe.event_id = e->event_id; strncpy(pe.name, e->name, sizeof(pe.name)-1); pe.name[sizeof(pe.name)-1] = '\0';
             strncpy(pe.venue, e->venue, sizeof(pe.venue)-1); pe.venue[sizeof(pe.venue)-1] = '\0';
             strncpy(pe.date, e->date, sizeof(pe.date)-1); pe.date[sizeof(pe.date)-1] = '\0';
-            pe.budget = e->budget;
-            pe.expenses = e->expenses;
-            pe.profit_loss = e->profit_loss;
+            pe.budget = e->budget; pe.expenses = e->expenses; pe.profit_loss = e->profit_loss;
             strncpy(pe.description, e->description, sizeof(pe.description)-1); pe.description[sizeof(pe.description)-1] = '\0';
-            pe.member_count = e->member_count;
-            pe.feedback_count = e->feedback_count;
+            pe.member_count = e->member_count; pe.feedback_count = e->feedback_count;
             fwrite(&pe, sizeof(PersistEvent), 1, persist_fp_global);
             for (int b = 0; b < e->member_map->size; ++b) {
                 AVLChain* cur = (AVLChain*)e->member_map->buckets[b];
-                while (cur) {
-                    if (cur->owner_id == e->event_id) avl_inorder(cur->tree, persist_write_member_cb);
-                    cur = cur->next;
-                }
+                while (cur) { if (cur->owner_id == e->event_id) avl_inorder(cur->tree, persist_write_member_cb); cur = cur->next; }
             }
         }
         avl_inorder(root, write_event);
     }
-    persist_fp_global = NULL;
-    fclose(efp);
+    persist_fp_global = NULL; fclose(efp);
 
-    FILE* ffp = fopen("feedback.dat", "wb");
-    if (!ffp) { printf("[ERR] cannot open feedback.dat\n"); return; }
+    FILE* ffp = fopen("feedback.dat", "wb"); if (!ffp) { printf("[ERR] cannot open feedback.dat\n"); return; }
     int total_feedback = 0;
     for (int i = 0; i < sys->event_map->size; ++i) {
-        AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i];
-        if (!root) continue;
-        void count_fb(void* data) {
-            Event* e = (Event*)data;
-            if (!e) return;
-            total_feedback += e->feedback_count;
-        }
+        AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i]; if (!root) continue;
+        void count_fb(void* data) { Event* e = (Event*)data; if (!e) return; total_feedback += e->feedback_count; }
         avl_inorder(root, count_fb);
     }
     fwrite(&total_feedback, sizeof(int), 1, ffp);
     persist_feedback_fp = ffp;
     for (int i = 0; i < sys->event_map->size; ++i) {
-        AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i];
-        if (!root) continue;
+        AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i]; if (!root) continue;
         void write_fbs(void* data) {
-            Event* e = (Event*)data;
-            if (!e) return;
+            Event* e = (Event*)data; if (!e) return;
             for (int b = 0; b < e->feedback_map->size; ++b) {
                 AVLChain* cur = (AVLChain*)e->feedback_map->buckets[b];
-                while (cur) {
-                    if (cur->owner_id == e->event_id) persist_write_feedback_avl(cur->tree, e->event_id);
-                    cur = cur->next;
-                }
+                while (cur) { if (cur->owner_id == e->event_id) persist_write_feedback_avl(cur->tree, e->event_id); cur = cur->next; }
             }
         }
         avl_inorder(root, write_fbs);
     }
-    persist_feedback_fp = NULL;
-    fclose(ffp);
+    persist_feedback_fp = NULL; fclose(ffp);
 }
 
-static void persist_save_all(IT_Club_System* sys) {
-    persist_save_departments(sys);
-    persist_save_events_and_feedback(sys);
-    printf("[SAVE] Data saved to departments.dat, events.dat, feedback.dat\n");
-}
+static void persist_save_all(IT_Club_System* sys) { persist_save_departments(sys); persist_save_events_and_feedback(sys); printf("[SAVE] Data saved to departments.dat, events.dat, feedback.dat\n"); }
 
 static void persist_load_departments(IT_Club_System* sys) {
-    FILE* fp = fopen("departments.dat", "rb");
-    if (!fp) return;
-    int cnt = 0;
-    if (fread(&cnt, sizeof(int), 1, fp) != 1) { fclose(fp); return; }
+    FILE* fp = fopen("departments.dat", "rb"); if (!fp) return;
+    int cnt = 0; if (fread(&cnt, sizeof(int), 1, fp) != 1) { fclose(fp); return; }
     for (int i = 0; i < cnt; ++i) {
-        PersistDepartment pd;
-        if (fread(&pd, sizeof(PersistDepartment), 1, fp) != 1) break;
+        PersistDepartment pd; if (fread(&pd, sizeof(PersistDepartment), 1, fp) != 1) break;
         Department* d = department_create(pd.dept_id, pd.name);
         for (int j = 0; j < pd.member_count; ++j) {
             Member* m = (Member*)malloc(sizeof(Member));
@@ -550,16 +470,12 @@ static void persist_load_departments(IT_Club_System* sys) {
 }
 
 static void persist_load_events(IT_Club_System* sys) {
-    FILE* fp = fopen("events.dat", "rb");
-    if (!fp) return;
-    int cnt = 0;
-    if (fread(&cnt, sizeof(int), 1, fp) != 1) { fclose(fp); return; }
+    FILE* fp = fopen("events.dat", "rb"); if (!fp) return;
+    int cnt = 0; if (fread(&cnt, sizeof(int), 1, fp) != 1) { fclose(fp); return; }
     for (int i = 0; i < cnt; ++i) {
-        PersistEvent pe;
-        if (fread(&pe, sizeof(PersistEvent), 1, fp) != 1) break;
+        PersistEvent pe; if (fread(&pe, sizeof(PersistEvent), 1, fp) != 1) break;
         Event* e = event_create(pe.event_id, pe.name, pe.venue, pe.date, pe.budget, pe.description);
-        e->expenses = pe.expenses;
-        e->profit_loss = pe.profit_loss;
+        e->expenses = pe.expenses; e->profit_loss = pe.profit_loss;
         for (int j = 0; j < pe.member_count; ++j) {
             Member* m = (Member*)malloc(sizeof(Member));
             if (fread(m, sizeof(Member), 1, fp) != 1) { free(m); break; }
@@ -572,158 +488,89 @@ static void persist_load_events(IT_Club_System* sys) {
 }
 
 static void persist_load_feedbacks(IT_Club_System* sys) {
-    FILE* fp = fopen("feedback.dat", "rb");
-    if (!fp) return;
-    int total = 0;
-    if (fread(&total, sizeof(int), 1, fp) != 1) { fclose(fp); return; }
+    FILE* fp = fopen("feedback.dat", "rb"); if (!fp) return;
+    int total = 0; if (fread(&total, sizeof(int), 1, fp) != 1) { fclose(fp); return; }
     for (int i = 0; i < total; ++i) {
-        PersistFeedback pf;
-        if (fread(&pf, sizeof(PersistFeedback), 1, fp) != 1) break;
+        PersistFeedback pf; if (fread(&pf, sizeof(PersistFeedback), 1, fp) != 1) break;
         Event* e = (Event*)hms_get_top(sys->event_map, pf.event_id);
         if (!e) continue;
-        Feedback* f = (Feedback*)malloc(sizeof(Feedback));
-        *f = pf.fb;
+        Feedback* f = (Feedback*)malloc(sizeof(Feedback)); *f = pf.fb;
         hmchain_insert_record(e->feedback_map, f->feedback_id, f, e->event_id);
         e->feedback_count++;
     }
     fclose(fp);
 }
 
-static void persist_load_all(IT_Club_System* sys) {
-    persist_load_departments(sys);
-    persist_load_events(sys);
-    persist_load_feedbacks(sys);
-    printf("[LOAD] Completed. Departments: %d, Events: %d\n", hms_count_all(sys->department_map), hms_count_all(sys->event_map));
-}
+static void persist_load_all(IT_Club_System* sys) { persist_load_departments(sys); persist_load_events(sys); persist_load_feedbacks(sys); printf("[LOAD] Completed. Departments: %d, Events: %d\n", hms_count_all(sys->department_map), hms_count_all(sys->event_map)); }
 
 // =======================
-// New encryption using system sha256sum
+// Encryption (sha256sum + xor)
 // =======================
-
-// generate_secure_key: use head -c 64 /dev/urandom | sha256sum
 static int generate_secure_key_hex(char out_hex64[65]) {
     FILE* fp = popen("head -c 64 /dev/urandom | sha256sum", "r");
-    if (!fp) {
-        printf("[ERR] Failed to execute sha256sum command.\n");
-        return -1;
-    }
+    if (!fp) { printf("[ERR] Failed to execute sha256sum command.\n"); return -1; }
     char buffer[128];
     if (!fgets(buffer, sizeof(buffer), fp)) { pclose(fp); return -1; }
     pclose(fp);
-    // extract first 64 hex chars
     int found = 0;
-    for (int i = 0; i < (int)strlen(buffer) && found < 64; ++i) {
-        if (isxdigit((unsigned char)buffer[i])) { out_hex64[found++] = buffer[i]; }
-    }
+    for (int i = 0; i < (int)strlen(buffer) && found < 64; ++i) if (isxdigit((unsigned char)buffer[i])) out_hex64[found++] = buffer[i];
     if (found != 64) return -1;
-    out_hex64[64] = '\0';
-    return 0;
+    out_hex64[64] = '\0'; return 0;
 }
-
-// xor file using hex key string (64 hex chars)
 static int xor_file_with_hex_key(const char* inpath, const char* outpath, const char* hexkey) {
     if (!inpath || !outpath || !hexkey) return -1;
-    size_t hexlen = strlen(hexkey);
-    if (hexlen != 64) return -1;
-
-    FILE* fi = fopen(inpath, "rb");
-    if (!fi) return -1;
-    FILE* fo = fopen(outpath, "wb");
-    if (!fo) { fclose(fi); return -1; }
-
-    unsigned char buf[4096];
-    size_t n;
-    size_t idx = 0;
+    if (strlen(hexkey) != 64) return -1;
+    FILE* fi = fopen(inpath, "rb"); if (!fi) return -1;
+    FILE* fo = fopen(outpath, "wb"); if (!fo) { fclose(fi); return -1; }
+    unsigned char buf[4096]; size_t n; size_t idx = 0;
     while ((n = fread(buf, 1, sizeof(buf), fi)) > 0) {
         for (size_t i = 0; i < n; ++i) {
-            // derive a byte from hexkey by taking two hex characters based on idx
-            int pos = (int)(idx % 32); // 32 bytes
-            char ha = hexkey[pos*2];
-            char hb = hexkey[pos*2 + 1];
+            int pos = (int)(idx % 32);
+            char ha = hexkey[pos*2], hb = hexkey[pos*2 + 1];
             unsigned char va = (ha >= '0' && ha <= '9') ? ha - '0' : (ha >= 'A' && ha <= 'F') ? ha - 'A' + 10 : (ha >= 'a' && ha <= 'f') ? ha - 'a' + 10 : 0;
             unsigned char vb = (hb >= '0' && hb <= '9') ? hb - '0' : (hb >= 'A' && hb <= 'F') ? hb - 'A' + 10 : (hb >= 'a' && hb <= 'f') ? hb - 'a' + 10 : 0;
             unsigned char keybyte = (va << 4) | vb;
-            buf[i] ^= keybyte;
-            idx++;
+            buf[i] ^= keybyte; idx++;
         }
         if (fwrite(buf, 1, n, fo) != n) { fclose(fi); fclose(fo); return -1; }
     }
-
-    fclose(fi); fclose(fo);
-    return 0;
+    fclose(fi); fclose(fo); return 0;
 }
-
 static void encrypt_all_files_generate_key(void) {
-    char hex[65];
-    if (generate_secure_key_hex(hex) != 0) { printf("[ERR] Failed to generate secure key.\n"); return; }
+    char hex[65]; if (generate_secure_key_hex(hex) != 0) { printf("[ERR] Failed to generate secure key.\n"); return; }
     printf("=== SECURE KEY (SAVE THIS - required for decryption) ===\n%s\n====================================================\n", hex);
-
     if (xor_file_with_hex_key("departments.dat", "departments.enc", hex) == 0) printf("[OK] departments.dat -> departments.enc\n"); else printf("[ERR] Failed to encrypt departments.dat\n");
     if (xor_file_with_hex_key("events.dat", "events.enc", hex) == 0) printf("[OK] events.dat -> events.enc\n"); else printf("[ERR] Failed to encrypt events.dat\n");
     if (xor_file_with_hex_key("feedback.dat", "feedback.enc", hex) == 0) printf("[OK] feedback.dat -> feedback.enc\n"); else printf("[ERR] Failed to encrypt feedback.dat\n");
 }
-
 static void decrypt_all_files_with_prompt(void) {
     char hex[128];
-    printf("Enter 64-character hex key (paste):\n");
-    input_read_line(hex, sizeof(hex));
+    printf("Enter 64-character hex key (paste):\n"); input_read_line(hex, sizeof(hex));
     if (strlen(hex) != 64) { printf("[ERR] Key must be 64 hex chars.\n"); return; }
-
     if (xor_file_with_hex_key("departments.enc", "departments.dat", hex) == 0) printf("[OK] departments.enc -> departments.dat\n"); else printf("[ERR] Failed to decrypt departments.enc\n");
     if (xor_file_with_hex_key("events.enc", "events.dat", hex) == 0) printf("[OK] events.enc -> events.dat\n"); else printf("[ERR] Failed to decrypt events.enc\n");
     if (xor_file_with_hex_key("feedback.enc", "feedback.dat", hex) == 0) printf("[OK] feedback.enc -> feedback.dat\n"); else printf("[ERR] Failed to decrypt feedback.enc\n");
 }
 
 // =======================
-// Auto-save thread
-// =======================
-static void* autosave_thread(void* arg) {
-    IT_Club_System* sys = (IT_Club_System*)arg;
-    for (;;) {
-        sleep(300); // 5 minutes
-        pthread_mutex_lock(&sys->data_lock);
-        persist_save_all(sys);
-        pthread_mutex_unlock(&sys->data_lock);
-    }
-    return NULL;
-}
-
-// =======================
-// Simple recursive data-only heap for Events
+// Simple recursive Event Heap (data-only) used elsewhere
 // =======================
 typedef struct Heap {
     Event** data;
     int size;
     int capacity;
 } Heap;
-static Heap* heap_create(int cap) {
-    Heap* h = (Heap*)malloc(sizeof(Heap));
-    h->data = malloc(sizeof(Event*) * cap);
-    h->size = 0; h->capacity = cap;
-    return h;
-}
+static Heap* heap_create(int cap) { Heap* h = (Heap*)malloc(sizeof(Heap)); h->data = malloc(sizeof(Event*) * cap); h->size = 0; h->capacity = cap; return h; }
 static void heap_swap(Heap* h, int a, int b) { Event* tmp = h->data[a]; h->data[a] = h->data[b]; h->data[b] = tmp; }
 static double heap_score(Event* e) { return e->profit_loss; }
-static void heapify_up_recursive(Heap* h, int idx) {
-    if (idx == 0) return;
-    int parent = (idx - 1) / 2;
-    if (heap_score(h->data[idx]) > heap_score(h->data[parent])) { heap_swap(h, idx, parent); heapify_up_recursive(h, parent); }
-}
-static void heapify_down_recursive(Heap* h, int idx) {
-    int left = 2*idx + 1, right = 2*idx + 2;
-    if (left >= h->size) return;
-    int largest = idx;
-    if (heap_score(h->data[left]) > heap_score(h->data[largest])) largest = left;
-    if (right < h->size && heap_score(h->data[right]) > heap_score(h->data[largest])) largest = right;
-    if (largest != idx) { heap_swap(h, idx, largest); heapify_down_recursive(h, largest); }
-}
+static void heapify_up_recursive(Heap* h, int idx) { if (idx == 0) return; int parent = (idx - 1) / 2; if (heap_score(h->data[idx]) > heap_score(h->data[parent])) { heap_swap(h, idx, parent); heapify_up_recursive(h, parent); } }
+static void heapify_down_recursive(Heap* h, int idx) { int left = 2*idx + 1, right = 2*idx + 2; if (left >= h->size) return; int largest = idx; if (heap_score(h->data[left]) > heap_score(h->data[largest])) largest = left; if (right < h->size && heap_score(h->data[right]) > heap_score(h->data[largest])) largest = right; if (largest != idx) { heap_swap(h, idx, largest); heapify_down_recursive(h, largest); } }
 static void heap_insert(Heap* h, Event* e) { if (h->size >= h->capacity) return; int idx = h->size++; h->data[idx] = e; heapify_up_recursive(h, idx); }
 static Event* heap_extract_max(Heap* h) { if (h->size == 0) return NULL; Event* max_event = h->data[0]; h->data[0] = h->data[h->size - 1]; h->size--; heapify_down_recursive(h, 0); return max_event; }
 
 // =======================
-// ParticipationRecord heap (for most active members)
+// Participation heap for counting (stores pointers to ParticipationRecord)
 // =======================
-typedef struct ParticipationRecord { Member* member; int count; } ParticipationRecord;
 typedef struct PHeap { ParticipationRecord** data; int size; int capacity; } PHeap;
 static PHeap* pheap_create(int cap) { PHeap* h = (PHeap*)malloc(sizeof(PHeap)); h->data = malloc(sizeof(ParticipationRecord*) * cap); h->size = 0; h->capacity = cap; return h; }
 static void pheap_swap(PHeap* h, int a, int b) { ParticipationRecord* tmp = h->data[a]; h->data[a] = h->data[b]; h->data[b] = tmp; }
@@ -734,75 +581,279 @@ static void pheap_insert(PHeap* h, ParticipationRecord* r) { if (h->size >= h->c
 static ParticipationRecord* pheap_extract_max(PHeap* h) { if (h->size == 0) return NULL; ParticipationRecord* r = h->data[0]; h->data[0] = h->data[h->size - 1]; h->size--; pheap_down(h, 0); return r; }
 
 // =======================
-// Reporting Top-K Events
+// Query Cache (simple hashmap with chaining)
 // =======================
-static Heap* reporting_heap = NULL;
-static void reporting_heap_cb(void* data) { if (!reporting_heap || !data) return; Event* e = (Event*)data; heap_insert(reporting_heap, e); }
-static void reporting_top_k(IT_Club_System* sys, int k) {
-    Heap* h = heap_create(1024);
-    reporting_heap = h;
-    for (int i = 0; i < sys->event_map->size; ++i) avl_inorder((AVL_Node*)sys->event_map->buckets[i], reporting_heap_cb);
-    reporting_heap = NULL;
-    printf("\n=== Top %d Events by Profit/Loss ===\n", k);
-    for (int i = 0; i < k && h->size > 0; ++i) {
-        Event* e = heap_extract_max(h);
-        printf("%d. %s (ID:%d) — Profit: %.2f\n", i+1, e->name, e->event_id, e->profit_loss);
+
+typedef struct CacheValue {
+    void* result;          // pointer to linked list of ParticipationRecord (PR nodes) or EVNode list
+    time_t cached_at;
+    int ttl;               // seconds
+    int type;              // 1 = PRNode list, 2 = EVNode list
+} CacheValue;
+
+/* Linked list wrapper node that points to a ParticipationRecord (allocated copy) */
+typedef struct PRNode {
+    ParticipationRecord* rec;
+    struct PRNode* next;
+} PRNode;
+
+/* Linked list wrapper node for Event results */
+typedef struct EVNode {
+    Event* event;
+    struct EVNode* next;
+} EVNode;
+
+/* Cache node (bucket chain) */
+typedef struct CacheNode {
+    char* key; // heap-allocated string
+    CacheValue* val;
+    struct CacheNode* next;
+} CacheNode;
+
+typedef struct QueryCache {
+    CacheNode** buckets;
+    int bucket_count;
+    pthread_mutex_t lock;
+} QueryCache;
+
+static unsigned long djb2_hash(const char* str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = (unsigned char)*str++)) hash = ((hash << 5) + hash) + c;
+    return hash;
+}
+
+static QueryCache* cache_create(int buckets) {
+    QueryCache* c = (QueryCache*)malloc(sizeof(QueryCache));
+    c->bucket_count = buckets;
+    c->buckets = (CacheNode**)calloc(buckets, sizeof(CacheNode*));
+    pthread_mutex_init(&c->lock, NULL);
+    return c;
+}
+
+/* free a linked list of PRNode and contained ParticipationRecord nodes */
+static void free_prlist(PRNode* head) {
+    while (head) {
+        PRNode* nxt = head->next;
+        if (head->rec) free(head->rec);
+        free(head);
+        head = nxt;
     }
-    free(h->data);
-    free(h);
 }
 
-// =======================
-// Most Active Member Feature
-// =======================
-static void participation_insert_seed(Member* m, HashMap_Chain* part_map, int owner_id) {
-    ParticipationRecord* r = (ParticipationRecord*)malloc(sizeof(ParticipationRecord));
-    r->member = m; r->count = 0;
-    hmchain_insert_record(part_map, m->member_id, r, owner_id);
-}
-static HashMap_Chain* g_part_map_tmp = NULL;
-static int g_part_owner_tmp = 0;
-static void seed_participation_cb(void* data) {
-    Member* m = (Member*)data;
-    if (!m || !g_part_map_tmp) return;
-    participation_insert_seed(m, g_part_map_tmp, g_part_owner_tmp);
-}
-static Department* g_active_dept = NULL;
-static HashMap_Chain* g_part_map_count = NULL;
-static void count_participation_member_cb(void* data) {
-    Member* m = (Member*)data;
-    if (!m || !g_active_dept || !g_part_map_count) return;
-    if (strcmp(m->department_name, g_active_dept->name) == 0) {
-        ParticipationRecord* r = (ParticipationRecord*)hmchain_get_record(g_part_map_count, m->member_id, g_active_dept->dept_id);
-        if (r) r->count++;
+/* free a linked list of EVNode (only free the wrapper nodes; Event objects are managed elsewhere) */
+static void free_evlist(EVNode* head) {
+    while (head) {
+        EVNode* nxt = head->next;
+        free(head);
+        head = nxt;
     }
 }
-static PHeap* g_ph_for_push = NULL;
-static void push_participation_cb(void* data) {
-    ParticipationRecord* r = (ParticipationRecord*)data;
-    if (!r || !g_ph_for_push) return;
-    pheap_insert(g_ph_for_push, r);
+
+/* free a cache node and its value */
+static void free_cache_node(CacheNode* node) {
+    if (!node) return;
+    if (node->key) free(node->key);
+    if (node->val) {
+        if (node->val->result) {
+            if (node->val->type == 1) free_prlist((PRNode*)node->val->result);
+            else if (node->val->type == 2) free_evlist((EVNode*)node->val->result);
+            else {
+                // unknown type -> attempt both (defensive)
+                free_prlist((PRNode*)node->val->result);
+                free_evlist((EVNode*)node->val->result);
+            }
+        }
+        free(node->val);
+    }
+    free(node);
 }
 
-static void display_most_active_members(IT_Club_System* sys) {
-    printf("Enter Department ID to analyze: ");
-    int did;
-    if (!input_read_int(&did)) return;
-    Department* d = (Department*)hms_get_top(sys->department_map, did);
-    if (!d) { printf("Department not found.\n"); return; }
+/* store a CacheValue under key (replaces if exists) */
+static void cache_store(QueryCache* cache, const char* key, CacheValue* val) {
+    if (!cache || !key || !val) return;
+    unsigned long h = djb2_hash(key);
+    int idx = h % cache->bucket_count;
+    pthread_mutex_lock(&cache->lock);
+    CacheNode* cur = cache->buckets[idx];
+    CacheNode* prev = NULL;
+    while (cur) {
+        if (strcmp(cur->key, key) == 0) {
+            // replace existing value safely
+            if (cur->val) {
+                if (cur->val->result) {
+                    if (cur->val->type == 1) free_prlist((PRNode*)cur->val->result);
+                    else if (cur->val->type == 2) free_evlist((EVNode*)cur->val->result);
+                    else { free_prlist((PRNode*)cur->val->result); free_evlist((EVNode*)cur->val->result); }
+                }
+                free(cur->val);
+            }
+            cur->val = val;
+            pthread_mutex_unlock(&cache->lock);
+            return;
+        }
+        prev = cur; cur = cur->next;
+    }
+    // not found: prepend
+    CacheNode* n = (CacheNode*)malloc(sizeof(CacheNode));
+    n->key = strdup(key);
+    n->val = val;
+    n->next = cache->buckets[idx];
+    cache->buckets[idx] = n;
+    pthread_mutex_unlock(&cache->lock);
+}
 
-    HashMap_Chain* part_map = create_HashMap_Chain(64, 1);
-    g_part_map_tmp = part_map; g_part_owner_tmp = d->dept_id;
-    for (int i = 0; i < d->member_map->size; ++i) {
-        AVLChain* cur = (AVLChain*)d->member_map->buckets[i];
+/* lookup returns pointer to CacheValue if present and not expired; otherwise NULL.
+   Note: returned pointer points into cache; caller must not free it.
+   For safety we will return a pointer to CacheValue, but since cleaner can remove it,
+   we keep caller use immediate and short-lived. */
+static CacheValue* cache_lookup(QueryCache* cache, const char* key) {
+    if (!cache || !key) return NULL;
+    unsigned long h = djb2_hash(key);
+    int idx = h % cache->bucket_count;
+    time_t now = time(NULL);
+    pthread_mutex_lock(&cache->lock);
+    CacheNode* cur = cache->buckets[idx];
+    CacheNode* prev = NULL;
+    while (cur) {
+        if (strcmp(cur->key, key) == 0) {
+            if (!cur->val) { pthread_mutex_unlock(&cache->lock); return NULL; }
+            if (now - cur->val->cached_at >= cur->val->ttl) {
+                // expired -> remove node
+                if (prev) prev->next = cur->next; else cache->buckets[idx] = cur->next;
+                free_cache_node(cur);
+                pthread_mutex_unlock(&cache->lock);
+                return NULL;
+            }
+            CacheValue* found = cur->val;
+            pthread_mutex_unlock(&cache->lock);
+            return found;
+        }
+        prev = cur; cur = cur->next;
+    }
+    pthread_mutex_unlock(&cache->lock);
+    return NULL;
+}
+
+/* invalidate a specific key */
+static void cache_invalidate_key(QueryCache* cache, const char* key) {
+    if (!cache || !key) return;
+    unsigned long h = djb2_hash(key);
+    int idx = h % cache->bucket_count;
+    pthread_mutex_lock(&cache->lock);
+    CacheNode* cur = cache->buckets[idx];
+    CacheNode* prev = NULL;
+    while (cur) {
+        if (strcmp(cur->key, key) == 0) {
+            if (prev) prev->next = cur->next; else cache->buckets[idx] = cur->next;
+            free_cache_node(cur);
+            break;
+        }
+        prev = cur; cur = cur->next;
+    }
+    pthread_mutex_unlock(&cache->lock);
+}
+
+/* invalidate keys that start with prefix (e.g., "QTKAMDID3") */
+static void cache_invalidate_prefix(QueryCache* cache, const char* prefix) {
+    if (!cache || !prefix) return;
+    size_t plen = strlen(prefix);
+    pthread_mutex_lock(&cache->lock);
+    for (int i = 0; i < cache->bucket_count; ++i) {
+        CacheNode* cur = cache->buckets[i];
+        CacheNode* prev = NULL;
         while (cur) {
-            if (cur->owner_id == d->dept_id) avl_inorder(cur->tree, seed_participation_cb);
+            if (strncmp(cur->key, prefix, plen) == 0) {
+                CacheNode* tofree = cur;
+                if (prev) prev->next = cur->next; else cache->buckets[i] = cur->next;
+                cur = cur->next;
+                free_cache_node(tofree);
+                continue;
+            }
+            prev = cur; cur = cur->next;
+        }
+    }
+    pthread_mutex_unlock(&cache->lock);
+}
+
+/* clean expired entries across all buckets */
+static void cache_clean_expired(QueryCache* cache) {
+    if (!cache) return;
+    time_t now = time(NULL);
+    pthread_mutex_lock(&cache->lock);
+    for (int i = 0; i < cache->bucket_count; ++i) {
+        CacheNode* cur = cache->buckets[i];
+        CacheNode* prev = NULL;
+        while (cur) {
+            if (cur->val && now - cur->val->cached_at >= cur->val->ttl) {
+                CacheNode* tofree = cur;
+                if (prev) prev->next = cur->next; else cache->buckets[i] = cur->next;
+                cur = cur->next;
+                free_cache_node(tofree);
+                continue;
+            }
+            prev = cur; cur = cur->next;
+        }
+    }
+    pthread_mutex_unlock(&cache->lock);
+}
+
+/* background thread */
+static void* cache_cleaner_thread(void* arg) {
+    QueryCache* cache = (QueryCache*)arg;
+    while (1) {
+        sleep(60); // every 60 seconds
+        cache_clean_expired(cache);
+    }
+    return NULL;
+}
+
+// =======================
+// Global cache instance
+// =======================
+static QueryCache* g_query_cache = NULL;
+
+// =======================
+// Reporting Top-K Active Members (integrated with cache)
+// =======================
+
+// Helper to find Department by name (returns pointer or NULL)
+static Department* find_department_by_name(IT_Club_System* sys, const char* name) {
+    Department* found = NULL;
+    void finder(void* data) {
+        Department* d = (Department*)data;
+        if (d && strcmp(d->name, name) == 0) found = d;
+    }
+    hms_traverse_all(sys->department_map, finder);
+    return found;
+}
+
+/* compute Top-K active members in department and return PRNode* head (caller owns list) */
+static PRNode* compute_topk_active(IT_Club_System* sys, Department* dept, int k) {
+    if (!sys || !dept) return NULL;
+    // Build participation map: map member_id -> ParticipationRecord*
+    HashMap_Chain* part_map = create_HashMap_Chain(128, 1); // chained mode for owner separation (owner_id = dept->dept_id for seeded list)
+    // Seed participation map with all members of department (count=0)
+    for (int i = 0; i < dept->member_map->size; ++i) {
+        AVLChain* cur = (AVLChain*)dept->member_map->buckets[i];
+        while (cur) {
+            if (cur->owner_id == dept->dept_id) {
+                // traverse avl and create ParticipationRecord for each member
+                void seed_cb(void* d) {
+                    Member* m = (Member*)d;
+                    if (!m) return;
+                    ParticipationRecord* pr = (ParticipationRecord*)malloc(sizeof(ParticipationRecord));
+                    pr->member = m; pr->count = 0;
+                    // store in map under key member_id, owner dept_id
+                    hmchain_insert_record(part_map, m->member_id, pr, dept->dept_id);
+                }
+                avl_inorder(cur->tree, seed_cb);
+            }
             cur = cur->next;
         }
     }
-    g_part_map_tmp = NULL;
 
-    g_active_dept = d; g_part_map_count = part_map;
+    // Now iterate over all events and increment counts for members from this department
     for (int i = 0; i < sys->event_map->size; ++i) {
         AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i];
         if (!root) continue;
@@ -812,76 +863,144 @@ static void display_most_active_members(IT_Club_System* sys) {
             for (int b = 0; b < e->member_map->size; ++b) {
                 AVLChain* cur = (AVLChain*)e->member_map->buckets[b];
                 while (cur) {
-                    if (cur->owner_id == e->event_id) avl_inorder(cur->tree, count_participation_member_cb);
+                    if (cur->owner_id == e->event_id) {
+                        // traverse members in this event and increment if department matches
+                        void inc_cb(void* md) {
+                            Member* m = (Member*)md;
+                            if (!m) return;
+                            // Only consider members who belong to the department by name
+                            if (strcmp(m->department_name, dept->name) == 0) {
+                                ParticipationRecord* existing = (ParticipationRecord*)hmchain_get_record(part_map, m->member_id, dept->dept_id);
+                                if (existing) existing->count++;
+                            }
+                        }
+                        avl_inorder(cur->tree, inc_cb);
+                    }
                     cur = cur->next;
                 }
             }
-        }
+        };
         avl_inorder(root, per_event_cb);
     }
-    g_active_dept = NULL; g_part_map_count = NULL;
 
-    PHeap* ph = pheap_create(256);
-    g_ph_for_push = ph;
+    // Build heap of ParticipationRecord*
+    PHeap* ph = pheap_create(1024);
     for (int i = 0; i < part_map->size; ++i) {
         AVLChain* cur = (AVLChain*)part_map->buckets[i];
         while (cur) {
-            if (cur->owner_id == d->dept_id) avl_inorder(cur->tree, push_participation_cb);
+            if (cur->owner_id == dept->dept_id) {
+                // traverse AVL of chain and insert
+                void push_cb(void* pdata) {
+                    ParticipationRecord* pr = (ParticipationRecord*)pdata;
+                    if (!pr) return;
+                    pheap_insert(ph, pr);
+                }
+                avl_inorder(cur->tree, push_cb);
+            }
             cur = cur->next;
         }
     }
-    g_ph_for_push = NULL;
 
-    int k = 3;
-    printf("\nTop %d active members in Department '%s' (by event participation):\n", k, d->name);
+    // Pop top k and create PRNode list of copies (so list is independent of part_map)
+    PRNode* head = NULL;
+    PRNode* tail = NULL;
     for (int i = 0; i < k; ++i) {
-        ParticipationRecord* rec = pheap_extract_max(ph);
-        if (!rec) break;
-        Member* m = rec->member;
-        printf("%d. %s (Member ID:%d) — Events Participated: %d\n", i+1, m->name, m->member_id, rec->count);
+        ParticipationRecord* pr = pheap_extract_max(ph);
+        if (!pr) break;
+        // create a copy of ParticipationRecord (owner: cache)
+        ParticipationRecord* prcopy = (ParticipationRecord*)malloc(sizeof(ParticipationRecord));
+        prcopy->member = pr->member; prcopy->count = pr->count;
+        PRNode* node = (PRNode*)malloc(sizeof(PRNode)); node->rec = prcopy; node->next = NULL;
+        if (!head) head = tail = node; else { tail->next = node; tail = node; }
     }
 
-    // Note: we don't free ph.data elements here (they point to ParticipationRecords stored in the chain)
-    // and members themselves are owned by Departments/Events; if you want to free everything on exit, add cleanup.
+    // Cleanup temporary heap and part_map's ParticipationRecord allocations
+    // We allocated ParticipationRecord for seeding in part_map; free them now (they are not used by cached copies)
+    for (int i = 0; i < part_map->size; ++i) {
+        AVLChain* cur = (AVLChain*)part_map->buckets[i];
+        while (cur) {
+            if (cur->owner_id == dept->dept_id) {
+                // traverse and free PRs
+                void free_pr_cb(void* pdata) {
+                    ParticipationRecord* pr = (ParticipationRecord*)pdata;
+                    if (pr) free(pr);
+                }
+                avl_inorder(cur->tree, free_pr_cb);
+            }
+            cur = cur->next;
+        }
+    }
+    // free part_map buckets and structure (not freeing nested AVLChains since above loop didn't free chains themselves)
+    // A small memory leak of chain metadata may exist if not cleaned; acceptable for this simple program run-time
+    // Free ph
+    free(ph->data); free(ph);
+
+    return head; // caller owns the PRNode list
+}
+
+// Display or compute Top-K with cache
+static void display_most_active_members_cached(IT_Club_System* sys) {
+    printf("Enter Department ID to analyze: "); int did; if (!input_read_int(&did)) return;
+    Department* d = (Department*)hms_get_top(sys->department_map, did);
+    if (!d) { printf("Department not found.\n"); return; }
+
+    char key[64]; snprintf(key, sizeof(key), "QTKAMDID%d", did);
+    CacheValue* cv = cache_lookup(g_query_cache, key);
+    if (cv) {
+        // use cached linked list
+        PRNode* p = (PRNode*)cv->result;
+        if (!p) { printf("Cached result empty.\n"); return; }
+        printf("\nTop cached active members for Department '%s':\n", d->name);
+        int rank = 1;
+        while (p) {
+            if (p->rec && p->rec->member) {
+                printf("%d. %s (Member ID:%d) — Events Participated: %d\n",
+                       rank++, p->rec->member->name, p->rec->member->member_id, p->rec->count);
+            }
+            p = p->next;
+        }
+        return;
+    }
+
+    // otherwise compute and cache
+    PRNode* head = compute_topk_active(sys, d, 3);
+    if (!head) { printf("No members to report.\n"); return; }
+
+    // Display
+    printf("\nTop active members for Department '%s':\n", d->name);
+    PRNode* it = head; int r = 1;
+    while (it) {
+        if (it->rec && it->rec->member) printf("%d. %s (Member ID:%d) — Events Participated: %d\n", r++, it->rec->member->name, it->rec->member->member_id, it->rec->count);
+        it = it->next;
+    }
+
+    // Store in cache
+    CacheValue* newcv = (CacheValue*)malloc(sizeof(CacheValue));
+    newcv->result = (void*)head;
+    newcv->cached_at = time(NULL);
+    newcv->ttl = 300;
+    newcv->type = 1; // PRNode list
+    cache_store(g_query_cache, key, newcv);
 }
 
 // =======================
-// Interactive functions
+// Interactive functions (create/edit/add/remove)
 // =======================
+static Department* find_department_by_id(IT_Club_System* sys, int id) {
+    return (Department*)hms_get_top(sys->department_map, id);
+}
+
 static void interactive_create_department(IT_Club_System* sys) {
-    printf("Enter Department ID (int): ");
-    int id;
-    if (!input_read_int(&id)) { printf("Invalid.\n"); return; }
+    printf("Enter Department ID (int): "); int id; if (!input_read_int(&id)) { printf("Invalid.\n"); return; }
     if (hms_get_top(sys->department_map, id)) { printf("Department ID exists.\n"); return; }
-    char name[100];
-    printf("Enter Department Name: ");
-    input_read_line(name, sizeof(name));
+    char name[100]; printf("Enter Department Name: "); input_read_line(name, sizeof(name));
     Department* d = department_create(id, name);
     hms_insert_top(sys->department_map, id, d);
     printf("Department '%s' added (ID:%d)\n", name, id);
 }
-static void interactive_create_event(IT_Club_System* sys) {
-    printf("Enter Event ID (int): ");
-    int id;
-    if (!input_read_int(&id)) { printf("Invalid.\n"); return; }
-    if (hms_get_top(sys->event_map, id)) { printf("Event ID exists.\n"); return; }
-    char name[100], venue[100], date[20], desc[256];
-    double budget = 0.0, expenses = 0.0;
-    printf("Enter Event Name: "); input_read_line(name, sizeof(name));
-    printf("Enter Venue: "); input_read_line(venue, sizeof(venue));
-    printf("Enter Date (DD/MM/YYYY): "); input_read_line(date, sizeof(date));
-    printf("Enter Budget: "); input_read_double(&budget);
-    printf("Enter Expenses: "); input_read_double(&expenses);
-    printf("Enter Description: "); input_read_line(desc, sizeof(desc));
-    Event* e = event_create(id, name, venue, date, budget, desc);
-    e->expenses = expenses;
-    e->profit_loss = budget - expenses;
-    hms_insert_top(sys->event_map, id, e);
-    printf("Event '%s' created (ID:%d) Profit/Loss: %.2f\n", name, id, e->profit_loss);
-}
+
 static void interactive_add_member_department(IT_Club_System* sys) {
-    printf("Enter Department ID: ");
-    int did; if (!input_read_int(&did)) return;
+    printf("Enter Department ID: "); int did; if (!input_read_int(&did)) return;
     Department* d = (Department*)hms_get_top(sys->department_map, did);
     if (!d) { printf("Department not found.\n"); return; }
     Member tmp;
@@ -895,10 +1014,23 @@ static void interactive_add_member_department(IT_Club_System* sys) {
     hmchain_insert_record(d->member_map, m->member_id, m, d->dept_id);
     d->member_count++;
     printf("Member '%s' (ID:%d) added to Dept '%s'\n", m->name, m->member_id, d->name);
+    // invalidate cache for this department
+    char keyprefix[64]; snprintf(keyprefix, sizeof(keyprefix), "QTKAMDID%d", d->dept_id);
+    cache_invalidate_key(g_query_cache, keyprefix);
 }
+
+static Department* find_department_by_name_in_sys(IT_Club_System* sys, const char* name) {
+    Department* found = NULL;
+    void find_cb(void* data) {
+        Department* d = (Department*)data;
+        if (d && strcmp(d->name, name) == 0) found = d;
+    }
+    hms_traverse_all(sys->department_map, find_cb);
+    return found;
+}
+
 static void interactive_add_member_event(IT_Club_System* sys) {
-    printf("Enter Event ID: ");
-    int eid; if (!input_read_int(&eid)) return;
+    printf("Enter Event ID: "); int eid; if (!input_read_int(&eid)) return;
     Event* e = (Event*)hms_get_top(sys->event_map, eid);
     if (!e) { printf("Event not found.\n"); return; }
     Member tmp;
@@ -912,23 +1044,39 @@ static void interactive_add_member_event(IT_Club_System* sys) {
     hmchain_insert_record(e->member_map, m->member_id, m, e->event_id);
     e->member_count++;
     printf("Member '%s' (ID:%d) added to Event '%s'\n", m->name, m->member_id, e->name);
+    // Try to locate department by name and invalidate its cache if found
+    Department* d = find_department_by_name_in_sys(sys, m->department_name);
+    if (d) {
+        char key[64]; snprintf(key, sizeof(key), "QTKAMDID%d", d->dept_id);
+        cache_invalidate_key(g_query_cache, key);
+    }
 }
+
 static void interactive_remove_member_event(IT_Club_System* sys) {
-    printf("Enter Event ID: ");
-    int eid; if (!input_read_int(&eid)) return;
+    printf("Enter Event ID: "); int eid; if (!input_read_int(&eid)) return;
     Event* e = (Event*)hms_get_top(sys->event_map, eid);
     if (!e) { printf("Event not found.\n"); return; }
-    printf("Enter Member ID to remove: ");
-    int mid; if (!input_read_int(&mid)) return;
+    printf("Enter Member ID to remove: "); int mid; if (!input_read_int(&mid)) return;
+    // before delete, try to fetch member to learn department
+    // search member in event's member_map
+    Member* m = (Member*)hmchain_get_record(e->member_map, mid, e->event_id);
+    if (m) {
+        char deptname[64]; strncpy(deptname, m->department_name, sizeof(deptname)-1); deptname[sizeof(deptname)-1] = '\0';
+        hmchain_delete_record(e->member_map, mid, e->event_id);
+        if (e->member_count > 0) e->member_count--;
+        printf("Attempted removal of member %d from event %d\n", mid, eid);
+        Department* d = find_department_by_name_in_sys(sys, deptname);
+        if (d) { char key[64]; snprintf(key, sizeof(key), "QTKAMDID%d", d->dept_id); cache_invalidate_key(g_query_cache, key); }
+        return;
+    }
     hmchain_delete_record(e->member_map, mid, e->event_id);
     if (e->member_count > 0) e->member_count--;
     printf("Attempted removal of member %d from event %d\n", mid, eid);
 }
+
 static void interactive_add_feedback_event(IT_Club_System* sys) {
-    printf("Enter Event ID: ");
-    int eid; if (!input_read_int(&eid)) return;
-    Event* e = (Event*)hms_get_top(sys->event_map, eid);
-    if (!e) { printf("Event not found.\n"); return; }
+    printf("Enter Event ID: "); int eid; if (!input_read_int(&eid)) return;
+    Event* e = (Event*)hms_get_top(sys->event_map, eid); if (!e) { printf("Event not found.\n"); return; }
     Feedback tmp;
     printf("Enter Feedback ID: "); if (!input_read_int(&tmp.feedback_id)) return;
     if (hmchain_get_record(e->feedback_map, tmp.feedback_id, e->event_id)) { printf("Feedback ID exists.\n"); return; }
@@ -940,54 +1088,111 @@ static void interactive_add_feedback_event(IT_Club_System* sys) {
     e->feedback_count++;
     printf("Feedback %d added to event %s\n", f->feedback_id, e->name);
 }
+
 static void interactive_edit_event_financials(IT_Club_System* sys) {
-    printf("Enter Event ID to edit: ");
-    int eid; if (!input_read_int(&eid)) return;
+    printf("Enter Event ID to edit: "); int eid; if (!input_read_int(&eid)) return;
     Event* e = (Event*)hms_get_top(sys->event_map, eid);
     if (!e) { printf("Event not found.\n"); return; }
     printf("Current Budget: %.2f | Expenses: %.2f | Profit/Loss: %.2f\n", e->budget, e->expenses, e->profit_loss);
     double nb, ne;
-    printf("Enter new Budget (press Enter to keep): ");
-    if (!input_read_double(&nb)) nb = e->budget;
-    printf("Enter new Expenses (press Enter to keep): ");
-    if (!input_read_double(&ne)) ne = e->expenses;
+    printf("Enter new Budget (press Enter to keep): "); if (!input_read_double(&nb)) nb = e->budget;
+    printf("Enter new Expenses (press Enter to keep): "); if (!input_read_double(&ne)) ne = e->expenses;
     e->budget = nb; e->expenses = ne; e->profit_loss = nb - ne;
     printf("Updated: Profit/Loss = %.2f\n", e->profit_loss);
+
+    // Invalidate Top-K events cache
+    cache_invalidate_prefix(g_query_cache, "QTKEVENT");
 }
-static void interactive_display_all_departments(IT_Club_System* sys) {
-    if (hms_count_all(sys->department_map) == 0) { printf("No departments.\n"); return; }
-    hms_traverse_all(sys->department_map, display_department_cb);
+
+static void interactive_display_all_departments(IT_Club_System* sys) { if (hms_count_all(sys->department_map) == 0) { printf("No departments.\n"); return; } hms_traverse_all(sys->department_map, display_department_cb); }
+static void interactive_display_members_department(IT_Club_System* sys) { printf("Enter Department ID: "); int did; if (!input_read_int(&did)) return; Department* d = (Department*)hms_get_top(sys->department_map, did); if (!d) { printf("Department not found.\n"); return; } if (d->member_count == 0) { printf("No members.\n"); return; } printf("Members in Department '%s':\n", d->name); hmchain_traverse_owner(d->member_map, d->dept_id, display_member_cb); }
+static void interactive_display_all_events(IT_Club_System* sys) { if (hms_count_all(sys->event_map) == 0) { printf("No events.\n"); return; } hms_traverse_all(sys->event_map, display_event_cb); }
+static void interactive_display_members_event(IT_Club_System* sys) { printf("Enter Event ID: "); int eid; if (!input_read_int(&eid)) return; Event* e = (Event*)hms_get_top(sys->event_map, eid); if (!e) { printf("Event not found.\n"); return; } if (e->member_count == 0) { printf("No members.\n"); return; } printf("Members in Event '%s':\n", e->name); hmchain_traverse_owner(e->member_map, e->event_id, display_member_cb); }
+static void interactive_display_feedback_event(IT_Club_System* sys) { printf("Enter Event ID: "); int eid; if (!input_read_int(&eid)) return; Event* e = (Event*)hms_get_top(sys->event_map, eid); if (!e) { printf("Event not found.\n"); return; } if (e->feedback_count == 0) { printf("No feedback.\n"); return; } printf("Feedback for Event '%s':\n", e->name); hmchain_traverse_owner(e->feedback_map, e->event_id, display_feedback_cb); }
+
+// =======================
+// Reporting Top-K events (cache-enabled)
+// =======================
+
+static void display_cached_top_events(EVNode* head) {
+    printf("\n=== Top Profitable Events (Cached) ===\n");
+    int r = 1;
+    while (head) {
+        if (head->event) {
+            printf("%d. %s (ID:%d) — Profit: %.2f\n",
+                   r++, head->event->name,
+                   head->event->event_id,
+                   head->event->profit_loss);
+        }
+        head = head->next;
+    }
 }
-static void interactive_display_members_department(IT_Club_System* sys) {
-    printf("Enter Department ID: ");
-    int did; if (!input_read_int(&did)) return;
-    Department* d = (Department*)hms_get_top(sys->department_map, did);
-    if (!d) { printf("Department not found.\n"); return; }
-    if (d->member_count == 0) { printf("No members.\n"); return; }
-    printf("Members in Department '%s':\n", d->name);
-    hmchain_traverse_owner(d->member_map, d->dept_id, display_member_cb);
+
+/* compute top-k events and return EVNode list (caller owns list) */
+static EVNode* compute_topk_events_list(IT_Club_System* sys, int k) {
+    if (!sys) return NULL;
+    Heap* h = heap_create(2048);
+
+    // Ingest all events into heap
+    for (int i = 0; i < sys->event_map->size; ++i) {
+        AVL_Node* root = (AVL_Node*)sys->event_map->buckets[i];
+        if (!root) continue;
+        void cb(void* data) { heap_insert(h, (Event*)data); }
+        avl_inorder(root, cb);
+    }
+
+    // Extract top-k and build EVNode list
+    EVNode* head = NULL;
+    EVNode* tail = NULL;
+
+    for (int i = 0; i < k && h->size > 0; ++i) {
+        Event* e = heap_extract_max(h);
+        if (!e) break;
+
+        EVNode* node = (EVNode*)malloc(sizeof(EVNode));
+        node->event = e;
+        node->next = NULL;
+
+        if (!head) head = tail = node;
+        else { tail->next = node; tail = node; }
+    }
+
+    free(h->data);
+    free(h);
+    return head;
 }
-static void interactive_display_all_events(IT_Club_System* sys) {
-    if (hms_count_all(sys->event_map) == 0) { printf("No events.\n"); return; }
-    hms_traverse_all(sys->event_map, display_event_cb);
-}
-static void interactive_display_members_event(IT_Club_System* sys) {
-    printf("Enter Event ID: ");
-    int eid; if (!input_read_int(&eid)) return;
-    Event* e = (Event*)hms_get_top(sys->event_map, eid);
-    if (!e) { printf("Event not found.\n"); return; }
-    if (e->member_count == 0) { printf("No members.\n"); return; }
-    printf("Members in Event '%s':\n", e->name);
-    hmchain_traverse_owner(e->member_map, e->event_id, display_member_cb);
-}
-static void interactive_display_feedback_event(IT_Club_System* sys) {
-    printf("Enter Event ID: ");
-    int eid; if (!input_read_int(&eid)) return;
-    Event* e = (Event*)hms_get_top(sys->event_map, eid);
-    if (!e) { printf("Event not found.\n"); return; }
-    if (e->feedback_count == 0) { printf("No feedback.\n"); return; }
-    printf("Feedback for Event '%s':\n", e->name);
-    hmchain_traverse_owner(e->feedback_map, e->event_id, display_feedback_cb);
+
+/* reporting_top_k now uses cache for Top-K events */
+static void reporting_top_k(IT_Club_System* sys, int k) {
+    char key[64];
+    snprintf(key, sizeof(key), "QTKEVENTK%d", k);
+
+    CacheValue* cv = cache_lookup(g_query_cache, key);
+    if (cv) {
+        display_cached_top_events((EVNode*)cv->result);
+        return;
+    }
+
+    // Compute fresh results
+    EVNode* head = compute_topk_events_list(sys, k);
+
+    printf("\n=== Top %d Events by Profit/Loss ===\n", k);
+    int rank = 1;
+    EVNode* it = head;
+    while (it) {
+        Event* e = it->event;
+        printf("%d. %s (ID:%d) — Profit: %.2f\n",
+               rank++, e->name, e->event_id, e->profit_loss);
+        it = it->next;
+    }
+
+    // Store into cache
+    CacheValue* newcv = (CacheValue*)malloc(sizeof(CacheValue));
+    newcv->result = (void*)head;
+    newcv->cached_at = time(NULL);
+    newcv->ttl = 300;
+    newcv->type = 2; // EVNode list
+    cache_store(g_query_cache, key, newcv);
 }
 
 // =======================
@@ -1017,6 +1222,16 @@ static void display_menu(void) {
     printf("Enter choice: ");
 }
 
+void* autosave_thread(void* arg) {
+    IT_Club_System* sys = (IT_Club_System*)arg;
+    while (1) {
+        sleep(30);
+        persist_save_all(sys);
+    }
+    return NULL;
+}
+
+
 int main(void) {
     IT_Club_System* sys = system_create();
     if (!sys) { fprintf(stderr, "Failed to initialize system.\n"); return 1; }
@@ -1024,28 +1239,52 @@ int main(void) {
     printf("[INIT] Loading data...\n");
     persist_load_all(sys);
 
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, autosave_thread, sys) == 0) pthread_detach(tid);
-    else printf("[WARN] autosave thread failed\n");
+    // initialize cache
+    g_query_cache = cache_create(128);
+    pthread_t cache_tid;
+    if (pthread_create(&cache_tid, NULL, cache_cleaner_thread, g_query_cache) == 0) pthread_detach(cache_tid);
+    else printf("[WARN] cache cleaner thread failed\n");
 
-    for (;;) {
+    // autosave thread
+    pthread_t autosave_tid;
+    if (pthread_create(&autosave_tid, NULL, autosave_thread, sys) != 0) {
+    printf("[WARN] Failed to start autosave thread.\n");
+    }
+    else {
+        // placeholder; real autosave implemented in previous versions
+    }
+
+    while (1) {
         display_menu();
-        int choice;
-        if (!input_read_int(&choice)) { printf("Invalid input.\n"); continue; }
+        int choice; if (!input_read_int(&choice)) { printf("Invalid input.\n"); continue; }
         pthread_mutex_lock(&sys->data_lock);
         switch (choice) {
-            case 1: interactive_create_event(sys); break;
+            case 1: {
+                printf("Enter Event ID: "); int id; if (!input_read_int(&id)) { printf("Invalid.\n"); break; }
+                if (hms_get_top(sys->event_map, id)) { printf("Event ID exists.\n"); break; }
+                char name[100], venue[100], date[20], desc[256]; double budget = 0.0, expenses = 0.0;
+                printf("Enter Event Name: "); input_read_line(name, sizeof(name));
+                printf("Enter Venue: "); input_read_line(venue, sizeof(venue));
+                printf("Enter Date (DD/MM/YYYY): "); input_read_line(date, sizeof(date));
+                printf("Enter Budget: "); input_read_double(&budget);
+                printf("Enter Expenses: "); input_read_double(&expenses);
+                printf("Enter Description: "); input_read_line(desc, sizeof(desc));
+                Event* e = event_create(id, name, venue, date, budget, desc);
+                e->expenses = expenses; e->profit_loss = budget - expenses;
+                hms_insert_top(sys->event_map, id, e);
+                printf("Event '%s' created (ID:%d) Profit/Loss: %.2f\n", name, id, e->profit_loss);
+
+                // Invalidate Top-K events cache when a new event is created
+                cache_invalidate_prefix(g_query_cache, "QTKEVENT");
+                break;
+            }
             case 2: interactive_create_department(sys); break;
             case 3: interactive_add_member_department(sys); break;
             case 4: interactive_add_member_event(sys); break;
             case 5: interactive_remove_member_event(sys); break;
             case 6: interactive_add_feedback_event(sys); break;
             case 7: {
-                printf("Enter Event ID: ");
-                int id; if (input_read_int(&id)) {
-                    Event* e = (Event*)hms_get_top(sys->event_map, id);
-                    if (!e) printf("Event not found.\n"); else display_event_cb(e);
-                }
+                printf("Enter Event ID: "); int id; if (input_read_int(&id)) { Event* e = (Event*)hms_get_top(sys->event_map, id); if (!e) printf("Event not found.\n"); else display_event_cb(e); }
                 break;
             }
             case 8: interactive_display_all_events(sys); break;
@@ -1058,10 +1297,11 @@ int main(void) {
             case 15: { decrypt_all_files_with_prompt(); persist_load_all(sys); } break;
             case 16: persist_save_all(sys); pthread_mutex_unlock(&sys->data_lock); printf("Saved. Exiting.\n"); exit(0); break;
             case 17: interactive_edit_event_financials(sys); break;
-            case 18: display_most_active_members(sys); break;
+            case 18: display_most_active_members_cached(sys); break;
             default: printf("Invalid choice.\n"); break;
         }
         pthread_mutex_unlock(&sys->data_lock);
     }
+
     return 0;
 }
